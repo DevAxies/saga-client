@@ -126,3 +126,5 @@ void HexMapRenderable::MouseMoved(float x, float y)
     }
 }
 ```
+
+**For Advanced Usage, Please see out/client.html and review the Files of Note mentioned above.**
