@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Client Test Environment</title>
+    <style>body {
+  font-family: arial;
+  margin: 0;
+  padding: none;
+}
+
+.emscripten { padding-right: 0; margin-left: auto; margin-right: auto; display: block; }
+div.emscripten { text-align: center; }
+div.emscripten_border { border: 1px solid black; }
+/* the canvas *must not* have any border or padding, or mouse coords will be wrong */
+canvas.emscripten { border: 0px none; background-color: black; }
+
+.topfixedbar { position: fixed; top: 0; right: 0; width: 100%; background-color: white; z-index: 1000; }
+.bottomfixedbar { position: fixed; bottom: 0; right: 0; width: 100%; z-index: 1000; }
+
+.spinner {
+  height: 30px;
+  width: 30px;
+  margin: 0;
+  margin-top: 20px;
+  margin-left: 20px;
+  display: inline-block;
+  vertical-align: top;
+
+  -webkit-animation: rotation .8s linear infinite;
+  -moz-animation: rotation .8s linear infinite;
+  -o-animation: rotation .8s linear infinite;
+  animation: rotation 0.8s linear infinite;
+
+  border-left: 5px solid rgb(235, 235, 235);
+  border-right: 5px solid rgb(235, 235, 235);
+  border-bottom: 5px solid rgb(235, 235, 235);
+  border-top: 5px solid rgb(120, 120, 120);
+
+  border-radius: 100%;
+  background-color: rgb(189, 215, 46);
+}
+
+@-webkit-keyframes rotation {
+  from {-webkit-transform: rotate(0deg);}
+  to {-webkit-transform: rotate(360deg);}
+}
+@-moz-keyframes rotation {
+  from {-moz-transform: rotate(0deg);}
+  to {-moz-transform: rotate(360deg);}
+}
+@-o-keyframes rotation {
+  from {-o-transform: rotate(0deg);}
+  to {-o-transform: rotate(360deg);}
+}
+@keyframes rotation {
+  from {transform: rotate(0deg);}
+  to {transform: rotate(360deg);}
+}
+
+#status {
+  display: inline-block;
+  vertical-align: top;
+  margin-top: 30px;
+  margin-left: 20px;
+  font-weight: bold;
+  color: rgb(120, 120, 120);
+}
+
+#progress {
+  height: 20px;
+  width: 300px;
+}
+
+#controls {
+  display: inline-block;
+  float: right;
+  vertical-align: top;
+  margin-top: 30px;
+  margin-right: 20px;
+}
+
+#output {
+  width: 100%;
+  height: 200px;
+  margin: 0 auto;
+  margin-top: 10px;
+  border-left: 0px;
+  border-right: 0px;
+  padding-left: 0px;
+  padding-right: 0px;
+  display: block;
+  background-color: black;
+  color: white;
+  font-family: 'Lucida Console', Monaco, monospace;
+  outline: none;
+}
+</style>
+  </head>
+  <body>
+    <div class="topfixedbar">
+      <span id='controls' width="100%">
+        <span class="spinner" id='spinner'></span>
+        <span id="status">Downloading...</span>
+        <span id="fpscounter"></span>
+        <span><input type="button" value="Clear Path" onclick="aStarSolver.ClearDebug(mapRenderable);" /></span>
+        <span><input type="button" value="Reset Map" onclick="mapRenderable.ClearMap(2); targetHexX = 20; targetHexY = 12; mapRenderable.SetHexTile(targetHexX, targetHexY, 1);" /></span>
+      </span>
+
+      <div class="emscripten">
+        <progress value="0" max="100" id="progress" hidden=1></progress>
+      </div>
+    </div>
+
+    <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex=-1></canvas>
+
+    <div class="bottomfixedbar">
+      <textarea id="output" rows="8" readonly></textarea>
+    </div>
+
+    <script type='text/javascript'>
+      //  Elements used for loading/progress of our WASM load
+      var statusElement = document.getElementById('status');
+      var progressElement = document.getElementById('progress');
+      var spinnerElement = document.getElementById('spinner');
+      var outputElement = document.getElementById('output');
+      if (outputElement) outputElement.value = ''; // clear browser cache
+
+      //  Globals relating to our simulation
+      var jsRenderWindow = null;
+      var mapRenderable = null;
+      var playerRenderable = null;
+      var camRot = true;
+      var targetHexX = -1;
+      var targetHexY = -1;
+      var playerHexX = -1;
+      var playerHexY = -1;
+      var aStarSolver = null;
+
+      //  Constant values
+      const playerYOffset = 0.1875;
+      const playerScale = 0.33;
+
+      //  Input Handling
+      var hasClickedOnCanvas = false;
+      var isMouseOverCanvas = false;
+      var wasLeftClick = false;
+
+      //  Helper function for creating our Hex Map inside our WASM engine
+      function CreateHexMap(){
+        //  If there is an existing map, clean it up
+        if (mapRenderable)
+        {
+          jsRenderWindow.GetScene().RemoveRenderable(mapRenderable);
+          mapRenderable.delete();
+        }
+
+        //  Allocate a new map renderable, clear it to Tile 2
+        mapRenderable = new Module.HexMapRenderable();
+        mapRenderable.ClearMap(2);
+
+        //  Set the Target Hex to a fixed location
+        targetHexX = 20;
+        targetHexY = 12;
+        mapRenderable.SetHexTile(targetHexX, targetHexY, 1);
+
+        //  Add the map renderable to the scene
+        jsRenderWindow.GetScene().AddRenderable(mapRenderable);
+        
+        //  Call an overridable callback for the map status being complete
+        Module.mapIsReadyCallback();
+      }
+
+      //  Helper function for creating our Player Renderable inside our WASM engine
+      function CreatePlayer(){
+        //  If there is an existing player renderable, clean it up
+        if (playerRenderable)
+        {
+          jsRenderWindow.GetScene().RemoveRenderable(playerRenderable);
+          playerRenderable.delete();
+        }
+
+        //  We attempt to get the position of the player user a specific "start" hex
+        var playerPosition = [0, 0, 0];
+        if (mapRenderable)
+        {
+          playerHexX = 5;
+          playerHexY = 12;
+          playerPosition = mapRenderable.GetWorldPositionForHex(playerHexX, playerHexY);
+          playerPosition[1] -= playerYOffset;
+        }
+
+        //  We allocate a new player, set its position and scale
+        playerRenderable = new Module.IcoSphereRenderable();
+        playerRenderable.SetPosition(playerPosition[0], playerPosition[1], playerPosition[2]);
+        playerRenderable.SetScale(playerScale);
+
+        //  Add the player to the scene
+        jsRenderWindow.GetScene().AddRenderable(playerRenderable);
+      }
+
+      //  Helper function for creating our A Star Solver
+      function CreateAStarSolver(){
+        //  If there is an existing A Star Solver, we clean it up
+        if (aStarSolver)
+        {
+          aStarSolver.ClearDebug(mapRenderable);
+          aStarSolver.delete();
+        }
+
+        //  Allocate a news A Star Solver
+        aStarSolver = new Module.AStarSolver();
+
+        //  Trigger a Solve Path operation to find the faster path from player to target
+        aStarSolver.SolvePath(mapRenderable, playerHexX, playerHexY, targetHexX, targetHexY);
+
+        //  Output the visuals of the path traced by our solver
+        aStarSolver.RenderDebug(mapRenderable);
+      }
+
+      function SetupInputMapping(){
+        window.addEventListener('keydown', function(event){
+          //  Currently not used, but we do stop propegating the event
+          event.stopImmediatePropagation();
+        }, true);
+        
+        window.addEventListener('keyup', function(event){
+          //  We handle basic keyboard input here for letting users update the specific hexes
+          //  they are currently mousing over. We also allow the user to trigger the A Star 
+          //  Solver.
+          if (event.key == 'a')
+          {
+            mapRenderable.SetActiveHexResourceID(2);
+            aStarSolver.ClearDebug(mapRenderable);
+          }
+          else if (event.key == 's')
+          {
+            mapRenderable.SetActiveHexResourceID(0);
+            aStarSolver.ClearDebug(mapRenderable);
+          }
+          else if (event.key == 'd')
+          {
+            mapRenderable.SetActiveHexResourceID(11);
+            aStarSolver.ClearDebug(mapRenderable);
+          }
+          else if (event.key == ' ')
+          {
+            CreateAStarSolver();
+          }
+          event.stopImmediatePropagation();
+        }, true);
+        
+        window.addEventListener('mousedown', function(event){
+            //  We check that the mouse is over the Canvas, if it is, we record that the
+            //  user clicked on the canvas and we pass the mouse down event through to the
+            //  WASM layer. We also record if the click was a left or right click.
+            var elementMouseIsOver = document.elementFromPoint(event.clientX, event.clientY);
+            wasLeftClick = event.which == 1;
+            if (elementMouseIsOver != null && elementMouseIsOver.id == "canvas")
+            {
+              //  Handle some state locally and send the click event through to our Canvas
+              hasClickedOnCanvas = true;
+              Module.Application.Get().MouseDown(event.clientX, event.clientY);
+            }
+      
+          event.stopImmediatePropagation();
+        }, true);
+        
+        window.addEventListener('mousemove', function(event){
+          //  In the case of mouse moves, we add a failure case for when the mouse moves over UI from the Canvas,
+          //  this is to let the Canvas know that the mouse has lost focus on it and to clear and selection states.
+          var elementMouseIsOver = document.elementFromPoint(event.clientX, event.clientY);
+          if (elementMouseIsOver != null && elementMouseIsOver.id == "canvas")
+          {
+            isMouseOverCanvas = true;
+            Module.Application.Get().MouseMove(event.clientX, event.clientY);
+          }
+          else if (isMouseOverCanvas)
+          {
+            Module.Application.Get().ClearFocus();
+            isMouseOverCanvas = false;
+          }
+      
+          event.stopImmediatePropagation();
+        }, true);
+        
+        window.addEventListener('mouseup', function(event){
+          //  The mouse up event will be sent as long as a mouse down has occurred over the Canvas, it takes a bool
+          //  that lets the application know if the user clicked on the Canvas or released over another UI element.
+          hasClickedOnCanvas = false;
+          var elementMouseIsOver = document.elementFromPoint(event.clientX, event.clientY);
+          if (elementMouseIsOver != null && elementMouseIsOver.id == "canvas")
+          {
+            Module.Application.Get().MouseUp(true);
+          }
+          else
+          {
+            Module.Application.Get().MouseUp(false);
+          }
+              
+          event.stopImmediatePropagation();
+        }, true);
+
+        window.addEventListener('mousewheel', function(event){
+          //  We already have local state tracking from mouse move if we are over the Canvas, so if we
+          //  are, process mouse scroll events and send them to the WASM layer.
+          if (isMouseOverCanvas)
+          {
+            Module.Application.Get().MouseWheel(event.deltaY);
+          }
+      
+          event.stopImmediatePropagation();
+        }, true);
+      }
+
+      //  This defines our WASM module object which handles state and interactions between the JS aad WASM layers
+      //  and is the primary control interface via which the JS layer interacts with our Client application.
+      var Module = {
+          preRun: [],
+          postRun: [ function() {
+              //  Upon loading we create our JSWindow which contains all the things we need to render a 3D
+              //  world. We push this onto our Applications Window stack.
+              jsRenderWindow = new Module.JSWindow3D();
+              Module.Application.Get().PushWindow(jsRenderWindow);
+
+              //  Set the camera location
+              jsRenderWindow.SetCameraPosition(-0.4, -0.4, -15.0);
+
+              //  Init our Hex Map
+              CreateHexMap();
+
+              //  Create our player representation
+              CreatePlayer();
+
+              //  Add all of our input hooks
+              SetupInputMapping();
+          }],
+          print: (function() {
+              return function(text) {
+                if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+                console.log(text);
+
+                if (outputElement) 
+                {
+                  outputElement.value += text + "\n";
+                  outputElement.scrollTop = outputElement.scrollHeight; // focus on bottom
+                }
+              };
+          })(),
+          printErr: function(text) {
+              if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+              console.error(text);
+          },
+          canvas: (function() {
+              var canvas = document.getElementById('canvas');
+
+              // As a default initial behavior, pop up an alert when webgl context is lost. To make your
+              // application robust, you may want to override this behavior before shipping!
+              // See http://www.khronos.org/registry/webgl/specs/latest/1.0/#5.15.2
+              canvas.addEventListener("webglcontextlost", function(e) { alert('WebGL context lost. You will need to reload the page.'); e.preventDefault(); }, false);
+
+              return canvas;
+          })(),
+          setStatus: function(text) {
+              if (!Module.setStatus.last) Module.setStatus.last = { time: Date.now(), text: '' };
+              if (text === Module.setStatus.last.text) return;
+              var m = text.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+              var now = Date.now();
+              if (m && now - Module.setStatus.last.time < 30) return; // if this is a progress update, skip it if too soon
+              Module.setStatus.last.time = now;
+              Module.setStatus.last.text = text;
+              if (m) {
+                  progressElement.value = parseInt(m[2])*100;
+                  progressElement.max = parseInt(m[4])*100;
+                  progressElement.hidden = false;
+                  spinnerElement.hidden = false;
+              } else {
+                  progressElement.value = null;
+                  progressElement.max = null;
+                  progressElement.hidden = true;
+                  if (!text) spinnerElement.style.display = 'none';
+              }
+              statusElement.innerHTML = text;
+          },
+          totalDependencies: 0,
+          monitorRunDependencies: function(left) {
+              this.totalDependencies = Math.max(this.totalDependencies, left);
+              Module.setStatus(left ? 'Preparing... (' + (this.totalDependencies-left) + '/' + this.totalDependencies + ')' : 'All downloads complete.');
+          },
+
+          //  Map related callback hooks, these are set via our JS interface to allow for callback based interactions with the WASM
+          //  Client core.
+          mapIsReadyCallback: () => { },
+          onMapClicked: (x, y) => { 
+            //  On a left click, we update the player and set their hex data,
+            //  on a right click we set tje target hex 
+            if (wasLeftClick)
+            {
+              if (mapRenderable && playerRenderable)
+              {
+                //  We get the world position for this hex, and update the player position and hex
+                //  information.
+                playerPosition = mapRenderable.GetWorldPositionForHex(x, y);
+                playerPosition[1] -= playerYOffset;
+                playerRenderable.SetPosition(playerPosition[0], playerPosition[1], playerPosition[2]);
+                playerHexX = x;
+                playerHexY = y;
+              }
+            }
+            else
+            {
+              if (mapRenderable)
+              {
+                //  If we have an old target, set it back to normal terrain
+                if (targetHexX != -1 && targetHexY != -1)
+                {
+                  mapRenderable.SetHexTile(targetHexX, targetHexY, 2);
+                }
+
+                //  Set the tile to the new target, and update the target hex data
+                mapRenderable.SetHexTile(x, y, 1);
+                targetHexX = x;
+                targetHexY = y;
+              }
+            }
+
+            aStarSolver.ClearDebug(mapRenderable);
+          }
+      };
+
+      Module.setStatus('Downloading...');
+      window.onerror = function(event) {
+          // TODO: do not warn on ok events like simulating an infinite loop or exitStatus
+          Module.setStatus('Exception thrown, see JavaScript console');
+          spinnerElement.style.display = 'none';
+          Module.setStatus = function(text) {
+              if (text) Module.printErr('[post-exception status] ' + text);
+          };
+      };
+    </script>
+    <script async type="text/javascript" src="client.js"></script>
+  </body>
+</html>
